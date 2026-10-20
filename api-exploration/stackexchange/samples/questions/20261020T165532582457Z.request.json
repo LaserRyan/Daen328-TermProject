@@ -1,0 +1,6 @@
+{
+  "requested_at_utc": "2026-10-20T16:55:32.316670+00:00",
+  "url": "https://api.stackexchange.com/2.3/questions?site=stackoverflow&order=desc&sort=creation&pagesize=100",
+  "http_status": 200,
+  "response_file": "20261020T165532582457Z.json"
+}

@@ -1,0 +1,141 @@
+{
+    "response": {
+        "query_summary": {
+            "num_reviews": 5,
+            "review_score": 8,
+            "review_score_desc": "Very Positive",
+            "total_positive": 739695,
+            "total_negative": 102194,
+            "total_reviews": 841889
+        },
+        "reviews": [
+            {
+                "recommendationid": "238169178",
+                "author": {
+                    "steamid": "76561198871349140",
+                    "num_reviews": 1,
+                    "playtime_forever": 13953,
+                    "playtime_last_two_weeks": 1452,
+                    "playtime_at_review": 13953,
+                    "last_played": 1792511148
+                },
+                "language": "english",
+                "review": "Stupid matchmaking enemy get smurf while i get braindead teammate that plays worse than a bot",
+                "timestamp_created": 1792511395,
+                "timestamp_updated": 1792511395,
+                "voted_up": false,
+                "votes_up": 0,
+                "votes_funny": 0,
+                "weighted_vote_score": 0.5,
+                "comment_count": 0,
+                "steam_purchase": true,
+                "received_for_free": false,
+                "written_during_early_access": false,
+                "primarily_steam_deck": false,
+                "refunded": false
+            },
+            {
+                "recommendationid": "238168811",
+                "author": {
+                    "steamid": "76561199211868880",
+                    "num_reviews": 1,
+                    "playtime_forever": 1569,
+                    "playtime_last_two_weeks": 0,
+                    "playtime_at_review": 1569,
+                    "last_played": 1763010551
+                },
+                "language": "english",
+                "review": "ggwp",
+                "timestamp_created": 1792511059,
+                "timestamp_updated": 1792511059,
+                "voted_up": true,
+                "votes_up": 0,
+                "votes_funny": 0,
+                "weighted_vote_score": 0.5,
+                "comment_count": 0,
+                "steam_purchase": true,
+                "received_for_free": false,
+                "written_during_early_access": false,
+                "primarily_steam_deck": false,
+                "refunded": false
+            },
+            {
+                "recommendationid": "238168195",
+                "author": {
+                    "steamid": "76561199002108933",
+                    "num_reviews": 1,
+                    "playtime_forever": 7870,
+                    "playtime_last_two_weeks": 1857,
+                    "playtime_at_review": 7832,
+                    "last_played": 1792513168
+                },
+                "language": "english",
+                "review": "The best way to Enjoy the game, is to mute all communications! hahaha",
+                "timestamp_created": 1792510458,
+                "timestamp_updated": 1792510458,
+                "voted_up": true,
+                "votes_up": 0,
+                "votes_funny": 0,
+                "weighted_vote_score": 0.5,
+                "comment_count": 0,
+                "steam_purchase": true,
+                "received_for_free": false,
+                "written_during_early_access": false,
+                "primarily_steam_deck": false,
+                "refunded": false
+            },
+            {
+                "recommendationid": "238168107",
+                "author": {
+                    "steamid": "76561199090664519",
+                    "num_reviews": 2,
+                    "playtime_forever": 166987,
+                    "playtime_last_two_weeks": 8867,
+                    "playtime_at_review": 166987,
+                    "last_played": 1792498454
+                },
+                "language": "english",
+                "review": "stressful",
+                "timestamp_created": 1792510382,
+                "timestamp_updated": 1792510382,
+                "voted_up": true,
+                "votes_up": 0,
+                "votes_funny": 0,
+                "weighted_vote_score": 0.5,
+                "comment_count": 0,
+                "steam_purchase": true,
+                "received_for_free": false,
+                "written_during_early_access": false,
+                "primarily_steam_deck": false,
+                "refunded": false
+            },
+            {
+                "recommendationid": "238167952",
+                "author": {
+                    "steamid": "76561199248189593",
+                    "num_reviews": 16,
+                    "playtime_forever": 4030,
+                    "playtime_last_two_weeks": 206,
+                    "playtime_at_review": 4030,
+                    "last_played": 1791924826
+                },
+                "language": "english",
+                "review": "ыаааа 67",
+                "timestamp_created": 1792510251,
+                "timestamp_updated": 1792510251,
+                "voted_up": true,
+                "votes_up": 0,
+                "votes_funny": 0,
+                "weighted_vote_score": 0.5,
+                "comment_count": 0,
+                "steam_purchase": true,
+                "received_for_free": false,
+                "written_during_early_access": false,
+                "primarily_steam_deck": false,
+                "refunded": false
+            }
+        ],
+        "cursor": "AoJ4//n7rKEDcPnEjAc=",
+        "total_matching": 841889
+    }
+}

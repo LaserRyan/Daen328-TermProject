@@ -1,0 +1,6 @@
+{
+  "requested_at_utc": "2026-10-20T16:21:49.749733+00:00",
+  "url": "https://api.steampowered.com/IUserReviewsService/GetAppReviews/v1/?input_json=%7B%22appid%22%3A+570%2C+%22num_per_page%22%3A+5%2C+%22filter%22%3A+1%2C+%22languages%22%3A+%5B%22english%22%5D%2C+%22purchase_type%22%3A+1%2C+%22cursor%22%3A+%22%2A%22%7D",
+  "http_status": 200,
+  "response_file": "20261020T162151015014Z.json"
+}

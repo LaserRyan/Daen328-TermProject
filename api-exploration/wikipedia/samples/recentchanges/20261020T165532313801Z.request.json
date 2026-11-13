@@ -1,6 +1,0 @@
-{
-  "requested_at_utc": "2026-10-20T16:55:32.113499+00:00",
-  "url": "https://en.wikipedia.org/w/api.php?action=query&list=recentchanges&format=json&rclimit=100&rcprop=title%7Cids%7Csizes%7Cflags%7Cuser%7Cuserid%7Ctimestamp%7Ccomment%7Ctags%7Cloginfo&rctype=edit%7Cnew%7Clog",
-  "http_status": 200,
-  "response_file": "20261020T165532313801Z.json"
-}

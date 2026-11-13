@@ -295,7 +295,7 @@ def extract(engine=None, since=None, skip_counts=False, config=None):
     config = config or load_config()
     if not config.key:
         print("  warning: SE_API_KEY is blank, so requests are anonymous (300/day). "
-              "See 'Stack Exchange API Instructions/stack-exchange-api-key-tutorial.md'.")
+              "See docs/stack-exchange-api-key-tutorial.md.")
 
     if since is not None:
         since_epoch = int(since.timestamp())

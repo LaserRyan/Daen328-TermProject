@@ -27,7 +27,7 @@ Display names can be real names and profile images can be real faces, so **we ne
 ## 2. Setup
 
 1. `pip install -r requirements.txt`
-2. Copy `.env.sample` to `.env` and fill it in. To get a key, follow [the Stack Exchange key tutorial](../Stack%20Exchange%20API%20Instructions/stack-exchange-api-key-tutorial.md). The variable is **`SE_API_KEY`**, which the tutorial also uses.
+2. Copy `.env.sample` to `.env` and fill it in. To get a key, follow [the Stack Exchange key tutorial](stack-exchange-api-key-tutorial.md). The variable is **`SE_API_KEY`**, which the tutorial also uses.
 3. Run:
 
 ```bash

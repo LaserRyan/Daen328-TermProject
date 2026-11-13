@@ -1,6 +1,0 @@
-{
-  "requested_at_utc": "2026-10-20T16:21:41.521333+00:00",
-  "url": "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=570&count=5&maxlength=0",
-  "http_status": 200,
-  "response_file": "20261020T162142116545Z.json"
-}

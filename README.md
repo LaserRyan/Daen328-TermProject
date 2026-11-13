@@ -1,26 +1,61 @@
-# Daen328-TermProject
+# DAEN 328 Term Project: Stack Overflow Activity Pipeline
 
-DAEN 328 team project: evaluating Steam reviews and Steam news as data sources.
-Source selection is pending team decision and TA approval.
+A dockerized ETL pipeline that pulls Stack Overflow questions and answers from the
+[Stack Exchange API v2.3](https://api.stackexchange.com/docs), cleans them with our own
+transform functions, loads them into PostgreSQL, and shows them in a Streamlit dashboard.
 
-## Try the sample pulls
+No user or account data is collected (see [docs/extraction.md](docs/extraction.md#1-privacy-decision-our-phase-1-risk)).
 
-Requires Python 3.10+ and internet access. No packages or API keys are needed.
-From this repository's folder:
+## Dashboard questions
 
-```powershell
-python api-exploration/steam/pull_reviews.py --appid 570 --count 5
-python api-exploration/steam/pull_news.py --appid 570 --count 5
+1. Which tags are growing or shrinking in question volume month over month?
+2. How has overall site activity changed over time?
+3. Which technologies (tags) tend to appear together?
+4. Which tags receive the most attention (score, comments, views)?
+5. How long does it take to get a first answer or an accepted answer, by tag?
+
+## Repository layout
+
+```
+extract.py          pulls questions, answers, monthly counts from the API   (Carson)
+transform.py        cleaning functions                                        (Jeremy)
+load.py             schema + upserts into PostgreSQL                          (David)
+streamlit_app.py    dashboard                                                 (everyone)
+db.py               shared SQLAlchemy engine from .env
+tests/              pytest tests
+docs/               extraction notes, API key tutorial
+Dockerfile, docker-compose.yml                                                (Jonathan)
+.env.sample         every environment variable, no secrets
 ```
 
-Use `--appid 730` for Counter-Strike 2 or `--appid 620` for Portal 2.
-Each request saves the actual response plus a companion `.request.json` with
-its URL, UTC request time, and HTTP status under `api-exploration/steam/samples/`.
-These are small exploration samples, not a complete ETL pipeline.
+## Run it
 
-Reviews: pass `--cursor "VALUE_FROM_PREVIOUS_RESPONSE"` to inspect another page;
-use `--sort updated` to inspect recently edited reviews. News: pass
-`--enddate UNIX_TIMESTAMP` to inspect older posts. Use `--help` for options.
-If a request fails, the script exits with an error; no mock response is substituted.
+1. Get a free API key: [docs/stack-exchange-api-key-tutorial.md](docs/stack-exchange-api-key-tutorial.md).
+2. `cp .env.sample .env` and fill in `SE_API_KEY` and the `POSTGRES_*` values.
+3. `docker-compose up --build`
+4. Open the dashboard at http://localhost:8501.
 
-See [source comparison](docs/source-comparison.md) for criteria and limitations.
+Run the tests with `docker-compose run --rm etl pytest`.
+
+## Schema and ERD
+
+_TODO (David): table descriptions and ERD image._
+
+## Incremental pulls
+
+See [docs/extraction.md, section 4](docs/extraction.md#4-incremental-pulls-for-the-readme-section).
+_TODO: copy the final version here before the freeze._
+
+## Dashboard screenshot
+
+_TODO_
+
+## Team
+
+| Member | Contribution |
+|---|---|
+| Carson Phillips (leader) | Extract |
+| Jeremy Suen | Transform |
+| David Garudo | Load |
+| Jonathan Silberstein | Docker |
+| Everyone | Dashboard |

@@ -23,7 +23,7 @@ load.py             schema + upserts into PostgreSQL                          (D
 streamlit_app.py    dashboard                                                 (everyone)
 db.py               shared SQLAlchemy engine from .env
 tests/              pytest tests
-docs/               extraction notes, API key tutorial
+docs/               extraction and transform notes, API key tutorial
 Dockerfile, docker-compose.yml                                                (Jonathan)
 .env.sample         every environment variable, no secrets
 ```
@@ -37,6 +37,11 @@ Dockerfile, docker-compose.yml                                                (J
 
 Run the tests with `docker-compose run --rm etl pytest`.
 
+## Layer notes
+
+- [Extraction](docs/extraction.md): sources, privacy, incremental pulls
+- [Transform](docs/transform.md): cleaning decisions and next steps
+
 ## Schema and ERD
 
 _TODO (David): table descriptions and ERD image._
@@ -44,7 +49,7 @@ _TODO (David): table descriptions and ERD image._
 ## Incremental pulls
 
 See [docs/extraction.md, section 4](docs/extraction.md#4-incremental-pulls-for-the-readme-section).
-_TODO: copy the final version here before the freeze._
+_TODO: copy the final version here once the pipeline is done._
 
 ## Dashboard screenshot
 

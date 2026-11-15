@@ -37,6 +37,19 @@ Dockerfile, docker-compose.yml                                                (J
 
 Run the tests with `docker-compose run --rm etl pytest`.
 
+### Where the data goes: local Postgres or Neon
+
+`db.py` picks the database from `.env`:
+
+| `DATABASE_URL` in `.env` | Database used | Who uses it |
+|---|---|---|
+| blank (default) | the `db` Postgres container in docker-compose, built from the `POSTGRES_*` values | graders, and anyone running the project from scratch |
+| a Neon connection string | our shared Neon database | the team, so everyone builds the dashboard on the same data |
+
+The pipeline creates its own tables in whichever database it points at, so both start the same way.
+For Neon, use the **direct** connection string (host without `-pooler`), since load creates tables.
+Each database keeps its own watermark, so the first run against either one is a full pull.
+
 ## Layer notes
 
 - [Extraction](docs/extraction.md): sources, privacy, incremental pulls

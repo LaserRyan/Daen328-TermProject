@@ -43,8 +43,9 @@ You only need Docker; there is nothing to install for Python. Pick a database in
 
 1. Get your own free API key: [docs/stack-exchange-api-key-tutorial.md](docs/stack-exchange-api-key-tutorial.md).
 2. `cp .env.sample .env`, then set `SE_API_KEY` (yours) and **one** of:
-   - **A. Neon:** `DATABASE_URL` = the team's Neon connection string (ask Carson; use the **direct** one, whose
-     host has no `-pooler`). Nothing else to start.
+   - **A. Neon:** the team's Neon details (ask Carson), either as one `DATABASE_URL` line or as the separate
+     `PGHOST`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`/`PGSSLMODE`/`PGCHANNELBINDING` lines Neon's "Connect" dialog gives
+     you. A pooled host (`-pooler`) is switched to the direct one automatically. Nothing else to start.
    - **B. Local:** leave `DATABASE_URL` blank, set `POSTGRES_USER` and `POSTGRES_PASSWORD` (any values), then start
      the database once: `docker compose --profile local up -d --wait db`.
 
@@ -100,11 +101,12 @@ Only one run can write at a time. If someone else's run is in progress you get
 
 ### Neon or local: what differs
 
-`db.py` picks the database from `.env`: `DATABASE_URL` set means Neon, blank means the local container.
+`db.py` picks the database from `.env`, first match wins: `DATABASE_URL`, then Neon's `PGHOST` lines, then the
+local `POSTGRES_*` values.
 
 | | A. Neon | B. Local |
 |---|---|---|
-| `.env` | `DATABASE_URL=<direct Neon string>` | `POSTGRES_USER`, `POSTGRES_PASSWORD` (blank `DATABASE_URL`) |
+| `.env` | `DATABASE_URL`, or Neon's `PGHOST`/`PGUSER`/... lines | `POSTGRES_USER`, `POSTGRES_PASSWORD` (no `DATABASE_URL`/`PGHOST`) |
 | Start the database | nothing (always on) | `docker compose --profile local up -d --wait db` |
 | Data and cursors | shared by the whole team | on your machine only, starts empty |
 | Wipe it | in the Neon console | `docker compose --profile local down -v` |

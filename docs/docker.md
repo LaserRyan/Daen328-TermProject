@@ -36,12 +36,16 @@ The dashboard will get its own service later.
 
 ### Setup A: Neon (shared team database)
 
-In `.env`, set `DATABASE_URL=` to the team's Neon connection string (ask Carson). Use the **direct** string, whose
-host does **not** contain `-pooler`: the pipeline creates tables and takes a database lock, which a pooled
-connection doesn't support. It looks like
-`postgresql://user:password@ep-xxxx.region.aws.neon.tech/dbname?sslmode=require`.
+Put the team's Neon connection details in `.env` in **either** of the two formats Neon's "Connect" dialog offers
+(ask Carson for the details):
 
-You don't need the `POSTGRES_*` values, and Neon's other format (`PGHOST`, `PGUSER`, ... lines) is ignored.
+- **One line:** `DATABASE_URL=postgresql://user:password@ep-xxxx.region.aws.neon.tech/dbname?sslmode=require`
+- **Separate lines** (what you get from Neon's "Parameters only" tab, can be pasted as is):
+  `PGHOST=`, `PGDATABASE=`, `PGUSER=`, `PGPASSWORD=`, `PGSSLMODE=`, `PGCHANNELBINDING=`
+
+If both are present, `DATABASE_URL` wins. You don't need the `POSTGRES_*` values. The pipeline creates tables and
+takes a database lock, which need Neon's **direct** connection rather than the pooled one. Neon often shows the
+pooled host (it contains `-pooler`); the pipeline removes `-pooler` for you, so pasting either is fine.
 There is no database container to start. Check the connection:
 
 ```bash
@@ -56,7 +60,7 @@ after a quiet spell can take a few seconds. Neon's plan has a size limit; see "S
 
 ### Setup B: Local database
 
-In `.env`, leave `DATABASE_URL=` **blank** and set `POSTGRES_USER=` and `POSTGRES_PASSWORD=` (any values you like;
+In `.env`, leave `DATABASE_URL=` **blank**, remove any Neon `PGHOST` lines (they take priority), and set `POSTGRES_USER=` and `POSTGRES_PASSWORD=` (any values you like;
 `POSTGRES_DB` can stay `stackexchange`). Then start the database container once:
 
 ```bash
@@ -172,17 +176,18 @@ is released automatically when its connection drops.
 | You see | Setup | Cause and fix |
 |---|---|---|
 | `failed to connect to the docker API` / `cannot find the file specified` | both | Docker Desktop isn't running. Start it and wait for "running". |
-| `missing in .env: POSTGRES_USER...` | A | `DATABASE_URL` is blank, so it fell back to the local database. Paste the Neon string into `.env`. |
-| `could not connect to Postgres (...)` | A | Check `DATABASE_URL`: direct string (no `-pooler`), password correct, no stray quotes or spaces. If Neon was idle, retry after a few seconds. |
+| `no database configured in .env` | A | Neither `DATABASE_URL` nor Neon's `PGHOST`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` lines are in `.env`. Add them. |
+| `could not connect to Postgres (...)` | A | Check the Neon details in `.env` (password correct, no stray spaces). If Neon was idle, retry after a few seconds. |
 | `could not translate host name "db"` or `connection refused` | B | The local database isn't running. Start it: `docker compose --profile local up -d --wait db`. |
-| `missing in .env: POSTGRES_USER, POSTGRES_PASSWORD` | B | Set both in `.env` (and leave `DATABASE_URL` blank). |
+| `no database configured in .env` | B | Set `POSTGRES_USER` and `POSTGRES_PASSWORD` in `.env` (and remove any `DATABASE_URL` / `PGHOST` lines, which take priority). |
 | `password authentication failed` | B | The volume was created with different credentials. Use the original ones, or wipe it: `docker compose --profile local down -v`. |
 | `port is already allocated` on 5432 | B | Set `POSTGRES_PORT_ON_HOST=5433` in `.env` and start it again. |
 | `SE_API_KEY is blank` warning | both | Anonymous calls are capped at 300 a day. Add your key to `.env`. |
 | `API error ... No site found` | both | `SE_SITE` in `.env` is wrong (it should be `stackoverflow`). |
 | `another run is in progress` | both | See "One run at a time" above. |
 | `nothing to update yet: run fill first` | both | `update` needs `fill` to have run once against this database. |
-| Edited code but the container behaves the same | both | Rebuild: `docker compose --profile "*" build`. |
+| Edited code but the container behaves the same | both | Rebuild: `docker compose --profile "*" build` (do this after every `git pull`). |
+| `docker logs fill_run` says `No such container` right after starting a background job | both | The job crashed immediately and `--rm` deleted the container with its logs. Run it in the foreground to see the error: `docker compose run --rm fill`. |
 
 ## 8. How it's put together
 

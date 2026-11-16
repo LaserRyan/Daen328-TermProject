@@ -1,0 +1,64 @@
+# Services:
+#   db      local PostgreSQL (used when DATABASE_URL in .env is blank)
+#   fill    pulls data the database doesn't have yet; run it until it says nothing is left
+#   update  upserts questions that changed since the last run
+# fill and update sit behind profiles, so a plain `docker compose up` only starts the database
+# and the two jobs never run at once (they share one database lock anyway). Run them with:
+#   docker compose run --rm fill
+#   docker compose run --rm update
+#   docker compose run --rm status       (what is in the database, what the last runs did)
+# With a Neon DATABASE_URL, add --no-deps so the local db isn't started:
+#   docker compose run --rm --no-deps fill
+# A dashboard service gets added here later.
+
+x-job: &job
+  build: .
+  env_file: .env
+  # Inside compose the database host is the service name, whatever .env says for local runs.
+  environment:
+    POSTGRES_HOST: db
+    POSTGRES_USER: ${POSTGRES_USER:-}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    POSTGRES_DB: ${POSTGRES_DB:-stackexchange}
+  depends_on:
+    db:
+      condition: service_healthy
+  volumes:
+    - ./data:/app/data     # raw API pages, so a run can be replayed without API calls
+  restart: "no"
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-stackexchange}
+    ports:
+      - "${POSTGRES_PORT_ON_HOST:-5432}:5432"   # change if 5432 is taken on your machine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-stackexchange}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  fill:
+    <<: *job
+    command: ["python", "fill.py"]
+    profiles: ["fill"]
+
+  update:
+    <<: *job
+    command: ["python", "update.py"]
+    profiles: ["update"]
+
+  # Read-only report: cursors, row counts, recent runs, whether a run is active.
+  status:
+    <<: *job
+    command: ["python", "status.py"]
+    profiles: ["status"]
+
+volumes:
+  pgdata:

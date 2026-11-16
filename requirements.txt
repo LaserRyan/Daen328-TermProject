@@ -1,6 +1,6 @@
-requests
-python-dotenv
-SQLAlchemy
-psycopg2-binary
-pandas
-pytest
+requests==2.34.2
+python-dotenv==1.2.4
+SQLAlchemy==2.1.8
+psycopg2-binary==2.9.13
+pandas==3.1.1
+pytest==9.2.0

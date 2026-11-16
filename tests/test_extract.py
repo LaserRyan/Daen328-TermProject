@@ -10,8 +10,7 @@ from extract import Client, Config, ExtractError, drop_user_fields
 
 
 def make_config(**overrides):
-    base = dict(key="test-key", site="stackoverflow",
-                start_date=datetime(2026, 1, 1, tzinfo=timezone.utc), max_pages=300,
+    base = dict(key="test-key", site="stackoverflow", max_pages=300,
                 history_start=datetime(2020, 1, 1, tzinfo=timezone.utc),
                 tracked_tags=["python"], request_interval=0)
     return Config(**{**base, **overrides})
@@ -112,6 +111,42 @@ def test_throttle_error_is_retried_then_succeeds(monkeypatch, no_sleep):
     assert no_sleep  # backed off before retrying
 
 
+def throttle(backoff=None):
+    body = {"error_id": 502, "error_name": "throttle_violation", "error_message": "slow down"}
+    if backoff:
+        body["backoff"] = backoff
+    return FakeResponse(body, 400)
+
+
+def test_throttle_retry_waits_out_the_backoff_the_error_reports(monkeypatch, no_sleep):
+    script_responses(monkeypatch, [throttle(backoff=30), FakeResponse({"items": []})])
+    Client(make_config()).fetch_page("questions", {})
+    assert no_sleep[-1] >= 30   # not the 2s a plain retry would use
+
+
+def test_throttle_retries_are_patient_then_give_up(monkeypatch, no_sleep):
+    calls = script_responses(monkeypatch, [throttle()] * 10)
+    with pytest.raises(ExtractError, match="gave up after 6 attempts"):
+        Client(make_config()).fetch_page("questions", {})
+    assert len(calls) == extract.THROTTLE_RETRIES
+    assert sum(no_sleep) >= 100   # waits grow each attempt
+
+
+def test_a_success_with_backoff_delays_the_next_request_with_a_margin(monkeypatch, no_sleep):
+    script_responses(monkeypatch, [FakeResponse({"items": [], "backoff": 10})])
+    client = Client(make_config())
+    client.fetch_page("questions", {})
+    assert client._next_allowed - extract.time.monotonic() > 10
+
+
+def test_error_messages_shorten_the_long_answers_path(monkeypatch, no_sleep):
+    script_responses(monkeypatch, [FakeResponse({"error_id": 400, "error_name": "x", "error_message": "bad"}, 400)])
+    path = "questions/" + ";".join(str(n) for n in range(100)) + "/answers"
+    with pytest.raises(ExtractError) as err:
+        Client(make_config()).fetch_page(path, {})
+    assert len(str(err.value)) < 120
+
+
 def test_gives_up_after_repeated_network_errors(monkeypatch, no_sleep):
     script_responses(monkeypatch, [requests.ConnectionError("down")] * 3)
     with pytest.raises(ExtractError, match="gave up after 3 attempts"):
@@ -132,27 +167,107 @@ def test_api_key_is_sent_when_configured_and_omitted_when_blank(monkeypatch, no_
     assert calls[0]["key"] == "abc" and "key" not in calls[1]
 
 
-class StubEngine:
-    """Engine whose connect() raises, like Postgres does for a missing etl_state table."""
-
-    def __init__(self, error):
-        self.error = error
-
-    def connect(self):
-        raise self.error
+def page(ids, has_more, quota=1000):
+    return FakeResponse({"items": [{"question_id": i} for i in ids], "has_more": has_more,
+                         "quota_remaining": quota})
 
 
-def test_get_watermark_returns_none_when_table_is_missing():
-    from sqlalchemy.exc import ProgrammingError
-    engine = StubEngine(ProgrammingError("SELECT", {}, Exception("relation etl_state does not exist")))
-    assert extract.get_watermark(engine, "stackoverflow") is None
+def test_paginate_reports_why_it_stopped(monkeypatch, no_sleep):
+    script_responses(monkeypatch, [page([1], False)])
+    client = Client(make_config())
+    list(client.paginate("questions", {}, "questions"))
+    assert client.stop_reason == "done"
+
+    script_responses(monkeypatch, [page([1], True), page([2], True)])
+    client = Client(make_config())
+    list(client.paginate("questions", {}, "questions", max_pages=2))
+    assert client.stop_reason == "page_cap"
 
 
-def test_get_watermark_reports_connection_failure_cleanly():
-    from sqlalchemy.exc import OperationalError
-    engine = StubEngine(OperationalError("SELECT", {}, Exception("connection refused")))
-    with pytest.raises(ExtractError, match="could not connect to Postgres"):
-        extract.get_watermark(engine, "stackoverflow")
+def test_paginate_stops_when_the_request_budget_is_spent(monkeypatch, no_sleep):
+    calls = script_responses(monkeypatch, [page([n], True) for n in range(10)])
+    client = Client(make_config(max_requests=3))
+    items = list(client.paginate("questions", {}, "questions"))
+    assert len(items) == 3 and len(calls) == 3
+    assert client.stop_reason == "budget"
+
+
+def test_paginate_stops_before_the_first_request_when_budget_is_zero(monkeypatch, no_sleep):
+    calls = script_responses(monkeypatch, [])
+    client = Client(make_config(max_requests=2))
+    client.pages_fetched = 2
+    assert list(client.paginate("questions", {}, "questions")) == []
+    assert calls == [] and client.stop_reason == "budget"
+
+
+def test_paginate_stops_when_quota_is_low(monkeypatch, no_sleep):
+    script_responses(monkeypatch, [page([1], True, quota=5), page([2], True)])
+    client = Client(make_config())
+    assert len(list(client.paginate("questions", {}, "questions"))) == 1
+    assert client.stop_reason == "quota"
+
+
+def test_fetch_question_batch_restarts_at_page_one_with_the_given_params(monkeypatch, no_sleep):
+    calls = script_responses(monkeypatch, [page([1], True), page([2], True), page([3], True)])
+    client = Client(make_config())
+    client.filter = "F"
+    items, reason = extract.fetch_question_batch(client, {"min": 123}, pages=2)
+    assert [i["question_id"] for i in items] == [1, 2] and reason == "page_cap"
+    assert [c["page"] for c in calls] == [1, 2]
+    assert all(c["min"] == 123 and c["filter"] == "F" for c in calls)
+
+
+def test_extract_answers_reports_incomplete_when_budget_runs_out(monkeypatch, no_sleep):
+    script_responses(monkeypatch, [FakeResponse({"items": [{"answer_id": 1}], "has_more": False})])
+    client = Client(make_config(max_requests=1))
+    client.filter = "F"
+    answers, complete = extract.extract_answers(client, list(range(1, 201)))  # needs 2 chunks
+    assert complete is False and len(answers) == 1
+
+
+def test_extract_answers_complete_when_every_chunk_finishes(monkeypatch, no_sleep):
+    script_responses(monkeypatch, [FakeResponse({"items": [{"answer_id": n}], "has_more": False})
+                                   for n in (1, 2)])
+    client = Client(make_config())
+    client.filter = "F"
+    answers, complete = extract.extract_answers(client, list(range(1, 201)))
+    assert complete is True and len(answers) == 2
+
+
+NOW = datetime(2026, 3, 15, tzinfo=timezone.utc)
+
+
+def test_months_to_fetch_skips_complete_months_and_fetches_missing_ones():
+    from datetime import date
+    existing = {("site", date(2026, 1, 1)): False}
+    todo = extract.months_to_fetch(existing, datetime(2026, 1, 1, tzinfo=timezone.utc), NOW, ["site"])
+    assert [(s, m.strftime("%Y-%m")) for s, m, _ in todo] == [("site", "2026-02"), ("site", "2026-03")]
+
+
+def test_months_to_fetch_refetches_a_partial_month_once_it_has_ended():
+    from datetime import date
+    existing = {("site", date(2026, 2, 1)): True, ("site", date(2026, 3, 1)): True}
+    start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    todo = extract.months_to_fetch(existing, start, NOW, ["site"])
+    assert [m.strftime("%Y-%m") for _, m, _ in todo] == ["2026-02"]   # March is still running
+
+
+def test_months_to_fetch_can_always_refresh_the_current_month():
+    from datetime import date
+    existing = {("site", date(2026, 3, 1)): True}
+    todo = extract.months_to_fetch(existing, datetime(2026, 3, 1, tzinfo=timezone.utc), NOW, ["site"],
+                                   refresh_partial=True)
+    assert [m.strftime("%Y-%m") for _, m, _ in todo] == ["2026-03"]
+
+
+def test_extract_monthly_counts_stops_at_budget_and_marks_the_partial_month(monkeypatch, no_sleep):
+    script_responses(monkeypatch, [FakeResponse({"total": 5}), FakeResponse({"total": 7})])
+    client = Client(make_config(max_requests=2))
+    todo = extract.months_to_fetch({}, datetime(2026, 2, 1, tzinfo=timezone.utc), NOW, ["site", "python"])
+    counts, complete = extract.extract_monthly_counts(client, todo, NOW)
+    assert complete is False and client.stop_reason == "budget"
+    assert [(c["scope"], c["month"], c["is_partial_month"]) for c in counts] == [
+        ("site", "2026-02", False), ("python", "2026-02", False)]
 
 
 def test_load_raw_rejects_a_folder_that_is_not_a_run(tmp_path):

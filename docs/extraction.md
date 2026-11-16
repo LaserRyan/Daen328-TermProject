@@ -1,7 +1,7 @@
 # Extraction layer (owner: Carson)
 
 Source: Stack Exchange API v2.3 (`api.stackexchange.com`), default site `stackoverflow`.
-Code: [`extract.py`](../extract.py), [`db.py`](../db.py). Tests: [`tests/test_extract.py`](../tests/test_extract.py).
+Code: [`extract.py`](../extract.py) (API client only), [`etl_common.py`](../etl_common.py), [`fill.py`](../fill.py), [`update.py`](../update.py), [`db.py`](../db.py). Tests: [`tests/test_extract.py`](../tests/test_extract.py), [`tests/test_etl.py`](../tests/test_etl.py).
 
 ```
 Stack Exchange API
@@ -11,7 +11,10 @@ extract.py ──► data/raw/<run>/*.json   (scrubbed; gitignored; replayable)
    │
    ▼  ExtractResult
 transform.py (Jeremy) ──► load.py (David) ──► Postgres ──► streamlit_app.py
-                                   └─ save_watermark(...) only after commit
+                                   └─ cursor (etl_state) written in the same transaction as the rows
+
+fill.py    = counts we don't have + questions older than the backfill cursor
+update.py  = questions with activity since the watermark (+ current month's counts)
 ```
 
 ## 1. Privacy decision (our Phase 1 risk)
@@ -31,16 +34,20 @@ Display names can be real names and profile images can be real faces, so **we ne
 3. Run:
 
 ```bash
-python extract.py --no-db --since 2026-11-10 --skip-counts   # quick check, no database
-python extract.py --from-raw data/raw/<run_stamp>             # replay a saved run, zero API calls
+python extract.py --since 2026-11-10                  # quick check: one page, no database
+python extract.py --from-raw data/raw/<run_stamp>     # replay a saved run, zero API calls
+python fill.py                                        # the real pipeline: see the README
+python update.py
 ```
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SE_API_KEY` | blank | Free key. Blank means anonymous (300 requests/day), which is enough for the quick check but **not** a full first run. |
+| `SE_API_KEY` | blank | Free key. Blank means anonymous (300 requests/day), which is enough for the quick check but **not** for `fill`. |
 | `SE_SITE` | `stackoverflow` | Which Stack Exchange site. |
-| `SE_START_DATE` | blank (60 days ago) | First-run window for row-level questions. |
-| `SE_MAX_PAGES` | `300` | Cap on question pages per run (100 per page). |
+| `SE_MAX_REQUESTS` | `10000` | API calls one run may spend (the daily quota with a key). |
+| `SE_BACKFILL_FLOOR` | `2025-01-01` | `fill` stops walking back at this creation date. |
+| `SE_BATCH_PAGES` | `10` | Question pages per committed batch. |
+| `SE_MAX_PAGES` | `300` | Cap on question pages per `update` run (100 per page). |
 | `SE_HISTORY_START` | `2020-01-01` | Monthly counts start here. |
 | `SE_TRACKED_TAGS` | 8 big tags, `;` separated | Tags that get monthly counts. |
 | `SE_REQUEST_INTERVAL` | `0.25` | Seconds between calls. |
@@ -59,16 +66,14 @@ Pulling every question back to 2020 isn't possible within quota. Instead, Q1 and
 
 ## 4. Incremental pulls (for the README section)
 
-- **What marks a record as new or changed:** the question's `last_activity_date`. Requests use `sort=activity&order=asc&min=<epoch>`, which returns every question with activity at or after that time. That covers new questions and questions that changed (an edit, a new answer, a close).
-- **Position:** the watermark is the maximum `last_activity_date` actually received, stored in Postgres in `etl_state`:
+The final version of this section is in the [README](../README.md#incremental-pulls-and-idempotency). In short:
 
-  ```sql
-  etl_state(source VARCHAR(100) PRIMARY KEY, last_activity_epoch BIGINT NOT NULL, last_run_at TIMESTAMPTZ NOT NULL)
-  ```
-  The `source` value is `"<site>:questions"`.
-- **First run** (no watermark): `min = SE_START_DATE`. Monthly counts run from `SE_HISTORY_START`.
-- **Later runs:** `min = watermark − 300s`. The 5-minute overlap guards against clock skew and ties, so the same question can arrive twice. The load upsert removes the repeat. Only the previous and current month's counts are refreshed.
-- **When the watermark moves:** `save_watermark(engine, site, result.max_activity_epoch)` is called **only after load has committed**, so a failed load is retried next run. Because order is ascending, a run stopped by the page cap or low quota still leaves a correct position.
+- **New or changed records:** `update` walks forward by `last_activity_date` from the watermark (`etl_state` row `<site>:questions`), with `min = watermark - 300s`. The 5-minute overlap guards against clock skew and ties, so the same question can arrive twice; the load upsert absorbs it.
+- **Data we don't have:** `fill` walks backward by `creation_date` from the cursor (`etl_state` row `<site>:backfill`) down to `SE_BACKFILL_FLOOR`.
+- **First run:** the first `fill` records "now" as the starting point of both cursors, so the two jobs meet with no gap.
+- **When a cursor moves:** inside the transaction that loads the batch, so a failed load leaves it where it was. A run stopped by the page cap, budget or quota still leaves a correct position, because both walks are ordered.
+- **Budget:** each run spends at most `SE_MAX_REQUESTS` calls and stops when the API's `quota_remaining` is below 10. The next run (anyone's) continues from the stored cursors.
+- **Monthly counts:** `fill` requests only months not stored yet; `update` refreshes the previous and current month.
 - **Caveat:** an incremental pull can return questions that are years old, because old questions get new activity. That's expected, and `creation_date` is the field for "when was it asked".
 
 ## 5. Handoffs
@@ -99,20 +104,17 @@ answers(answer_id PK, question_id FK -> questions, score, is_accepted, creation_
 tags(tag_name PK)
 question_tags(question_id FK, tag_name FK, PRIMARY KEY (question_id, tag_name))
 tag_monthly_counts(scope, month, PRIMARY KEY (scope, month), question_count)
-etl_state(source PK, ...)      -- see section 4; save_watermark creates it if missing
+etl_state(source PK, last_activity_epoch, last_run_at)   -- the two cursors, see section 4; defined in load.py
 ```
 
 - No `users` table.
 - Upsert everything with `INSERT ... ON CONFLICT ... DO UPDATE`. The answers stream can include answers whose question was already loaded; that's fine.
-- The `etl_state` table is created by `save_watermark`. If you'd rather create it in your schema script, keep the same column names.
-- `db.get_engine()` builds the SQLAlchemy engine from the `POSTGRES_*` variables.
+- `etl_state` is defined in `load.py` next to the other tables and created by `create_schema`.
+- `db.get_engine()` builds the SQLAlchemy engine from `DATABASE_URL` (Neon) or the `POSTGRES_*` variables.
 
 ### Jonathan (Docker)
 
-- The `etl` service should wait for the database (`depends_on` with a healthcheck, `condition: service_healthy`). `POSTGRES_HOST` is the compose service name (`db` by default).
-- Pass `.env` through to `etl` and the dashboard.
-- Expect the first full run to take a while. With a key it's about 1,000 requests, paced at roughly a quarter second each plus the network time. Don't set a short healthcheck or timeout on `etl`.
-- `data/` (raw files) is gitignored. Mounting it as a volume is optional.
+One image, three compose services: `db`, `fill` and `update` (see `docker-compose.yml`). The jobs wait for the database healthcheck, get `.env` passed in, and mount `./data` for the raw files. They sit behind profiles, so run them with `docker compose run --rm fill` / `update`. A full `fill` takes 1-2 hours, so there are no short timeouts.
 
 ### Everyone (dashboard)
 
@@ -125,19 +127,22 @@ Every failure becomes one line on stderr and exit code 1, with no traceback:
 | Situation | What happens |
 |---|---|
 | Bad site, bad parameter, bad key | Fails immediately with the API's own message, e.g. `No site found for name 'notasite'`. |
-| Timeout, 5xx, throttle (`error_id` 502) | Retries 3 times with growing waits, then `gave up after 3 attempts`. |
-| API `backoff` field | The next request waits that long. |
-| `quota_remaining < 10` | The stream stops early with a message and keeps what it already has. |
+| Timeout, 5xx, non-JSON 5xx | Retries 3 times with growing waits, then `gave up after 3 attempts`. |
+| Throttle (`error_id` 502, "Violation of backoff parameter") | Waits out the API's backoff (at least 10s, longer each attempt) and retries up to 6 times, then gives up. |
+| API `backoff` field, on any response | The next request waits that long plus 1 second. |
+| `quota_remaining < 10`, or `SE_MAX_REQUESTS` spent | The stream stops early, the finished batches stay loaded, and the summary says why. A batch whose answers weren't all fetched is dropped and retried next run. |
 | Postgres unreachable | `could not connect to Postgres (...)`. |
+| Another run holds the lock | `another run is in progress against this database`. |
+| `update` before any `fill` | `nothing to update yet: run fill first`. |
 | Blank `SE_API_KEY` | Warning only, so the quick check still works. |
 
-## 7. Summary fields extract provides
+## 7. Run summary
 
-`summary_lines(result)` returns the rows received per stream, whether the run was full or incremental (and since when), the pages fetched and the quota remaining. Transform and load add cleaning and insert/update counts to the final ETL summary.
+While running, each job prints one timestamped line per loaded batch and records itself in `etl_runs`; `python status.py` (or `docker compose run --rm status`) reports the database and the recent runs. See [docker.md](docker.md#5-monitoring). At the end each job prints requests used of the budget, the API quota remaining, why each stream stopped, the transform lines, the load lines (inserted / updated / skipped as older than stored) and where the cursors are now.
 
 ## 8. Open questions
 
 - Final `SE_TRACKED_TAGS` list.
-- Length of the row-level window (`SE_START_DATE`) for Q3–Q5.
+- `SE_BACKFILL_FLOOR` for Q3-Q5, limited by how much data our Neon plan can hold.
 - Duplicate-closed questions: keep or exclude?
-- Will we mount `data/raw` as a volume?
+- ~~Will we mount `data/raw` as a volume?~~ Yes, `./data` is mounted in compose.

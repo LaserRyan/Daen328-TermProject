@@ -1,11 +1,18 @@
 """Extract: pull questions, answers, and monthly question counts from the Stack Exchange API.
 
+This module only talks to the API. It never touches the database: where a run starts and
+stops (the cursors in etl_state) is handled by fill.py, update.py and etl_common.py.
+
 Privacy (Phase 1 risk): no user or account data is requested, saved to disk, or returned.
 A custom API filter whitelists the fields we need, and drop_user_fields() scrubs every
 item again before it is written or handed to transform.
 
+Every Client has a request budget (SE_MAX_REQUESTS). paginate() and the stream helpers stop
+cleanly when it is spent or the API's own quota_remaining runs low, and record why in
+Client.stop_reason ("done", "page_cap", "budget" or "quota").
+
 Run standalone:
-    python extract.py --no-db --since 2026-11-10 --skip-counts
+    python extract.py --since 2026-11-10          # quick check: one page, no database
     python extract.py --from-raw data/raw/<run_stamp>
 """
 import argparse
@@ -14,7 +21,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -24,6 +31,8 @@ API = "https://api.stackexchange.com/2.3"
 RAW_ROOT = Path(__file__).resolve().parent / "data" / "raw"
 OVERLAP_SECONDS = 300
 MAX_RETRIES = 3
+THROTTLE_RETRIES = 6    # throttle violations are worth waiting out for much longer
+BACKOFF_MARGIN = 1      # extra seconds on top of every API backoff
 QUOTA_FLOOR = 10
 PAGE_SIZE = 100
 
@@ -51,11 +60,13 @@ class ExtractError(Exception):
 class Config:
     key: str | None
     site: str
-    start_date: datetime
-    max_pages: int
-    history_start: datetime
+    max_pages: int              # cap on question pages per update run
+    history_start: datetime     # monthly counts start here
     tracked_tags: list[str]
     request_interval: float
+    max_requests: int = 10000   # API calls one run may spend (our per-person daily budget)
+    backfill_floor: datetime = datetime(2025, 1, 1, tzinfo=timezone.utc)  # fill stops here
+    batch_pages: int = 10       # question pages per committed batch
 
 
 @dataclass
@@ -79,22 +90,26 @@ def _parse_date(value, name):
 
 def load_config():
     load_dotenv()
-    start = os.getenv("SE_START_DATE", "").strip()
     try:
         max_pages = int(os.getenv("SE_MAX_PAGES", "300"))
         interval = float(os.getenv("SE_REQUEST_INTERVAL", "0.25"))
+        max_requests = int(os.getenv("SE_MAX_REQUESTS", "10000"))
+        batch_pages = int(os.getenv("SE_BATCH_PAGES", "10"))
     except ValueError as e:
         raise ExtractError(f"Bad number in .env: {e}")
+    if max_requests < 1 or batch_pages < 1 or max_pages < 1:
+        raise ExtractError("SE_MAX_REQUESTS, SE_BATCH_PAGES and SE_MAX_PAGES must be at least 1")
     tags = os.getenv("SE_TRACKED_TAGS", "python;javascript;java;c#;c++;reactjs;sql;typescript")
     return Config(
         key=os.getenv("SE_API_KEY", "").strip() or None,
         site=os.getenv("SE_SITE", "stackoverflow").strip(),
-        start_date=(_parse_date(start, "SE_START_DATE") if start
-                    else datetime.now(timezone.utc) - timedelta(days=60)),
         max_pages=max_pages,
         history_start=_parse_date(os.getenv("SE_HISTORY_START", "2020-01-01"), "SE_HISTORY_START"),
-        tracked_tags=[t.strip() for t in tags.split(";") if t.strip()],
+        tracked_tags=[t.strip().lower() for t in tags.split(";") if t.strip()],
         request_interval=interval,
+        max_requests=max_requests,
+        backfill_floor=_parse_date(os.getenv("SE_BACKFILL_FLOOR", "2025-01-01"), "SE_BACKFILL_FLOOR"),
+        batch_pages=batch_pages,
     )
 
 
@@ -116,6 +131,7 @@ class Client:
         self.pages_fetched = 0
         self.quota_remaining = None
         self.filter = None
+        self.stop_reason = None   # why the last paginate()/stream helper stopped
         self._next_allowed = 0.0
         self._saved = {}
 
@@ -131,8 +147,14 @@ class Client:
         if self.config.key:
             params["key"] = self.config.key
         url = f"{API}/{path}"
-        for attempt in range(1, MAX_RETRIES + 1):
+        # Answers URLs carry up to 100 ids; keep error messages readable.
+        label = path if len(path) <= 40 else path[:20] + "..." + path.rsplit("/", 1)[-1]
+        attempt, throttled = 0, False
+        while True:
+            attempt += 1
             self._wait_turn()
+            backoff = 0
+            throttled = False
             try:
                 resp = requests.get(url, params=params, timeout=30)
             except requests.RequestException as e:
@@ -146,28 +168,52 @@ class Client:
                 if data is None:
                     retry_reason = f"HTTP {resp.status_code} with a non-JSON body"
                     if resp.status_code < 500:
-                        raise ExtractError(f"{path}: {retry_reason}")
+                        raise ExtractError(f"{label}: {retry_reason}")
                 elif "error_id" in data:
                     retry_reason = (f"API error {data['error_id']} {data.get('error_name', '')}: "
                                     f"{data.get('error_message', '')}")
                     if data["error_id"] != 502:  # 502 = throttle_violation, worth retrying
-                        raise ExtractError(f"{path}: {retry_reason}")
+                        raise ExtractError(f"{label}: {retry_reason}")
+                    throttled = True
+                    backoff = data.get("backoff") or 0
                 elif resp.status_code >= 500:
                     retry_reason = f"HTTP {resp.status_code}"
                 else:
                     self.pages_fetched += 1
                     self.quota_remaining = data.get("quota_remaining", self.quota_remaining)
                     if data.get("backoff"):
-                        self._next_allowed = time.monotonic() + data["backoff"]
+                        # +1s margin: the API counts the backoff from when it answered.
+                        self._next_allowed = time.monotonic() + data["backoff"] + BACKOFF_MARGIN
                     return data
-            if attempt == MAX_RETRIES:
-                raise ExtractError(f"{path}: gave up after {MAX_RETRIES} attempts, last was {retry_reason}")
-            wait = 2 ** attempt
-            print(f"  retrying {path} in {wait}s ({retry_reason})", flush=True)
+            limit = THROTTLE_RETRIES if throttled else MAX_RETRIES
+            if attempt >= limit:
+                raise ExtractError(f"{label}: gave up after {attempt} attempts, last was {retry_reason}")
+            # A throttle violation means we asked too soon: wait out the API's backoff (at least
+            # 10s), longer each time. Anything else gets a short exponential wait.
+            wait = max(backoff, 10) * attempt + BACKOFF_MARGIN if throttled else 2 ** attempt
+            self._next_allowed = max(self._next_allowed, time.monotonic() + wait)
+            print(f"  retrying {label} in {wait}s ({retry_reason})", flush=True)
             time.sleep(wait)
 
     def quota_low(self):
         return self.quota_remaining is not None and self.quota_remaining < QUOTA_FLOOR
+
+    def budget_left(self):
+        return self.config.max_requests - self.pages_fetched
+
+    def spend_block(self):
+        """Why the next request must not be sent ("budget" or "quota"), or None if it may."""
+        if self.budget_left() <= 0:
+            return "budget"
+        if self.quota_low():
+            return "quota"
+        return None
+
+    def can_spend(self):
+        return self.spend_block() is None
+
+    def ensure_filter(self):
+        return self.filter or self.build_filter()
 
     def save_raw(self, kind, payload):
         if not self.raw_dir:
@@ -186,38 +232,65 @@ class Client:
         return self.filter
 
     def paginate(self, path, params, kind, max_pages=None):
-        """Yield scrubbed items page by page until has_more is false, the page cap, or low quota."""
+        """Yield scrubbed items page by page. Sets self.stop_reason when it ends:
+
+        "done"      the API said has_more is false: nothing more to fetch
+        "page_cap"  max_pages reached and the API has more (the caller can continue)
+        "budget"    SE_MAX_REQUESTS spent
+        "quota"     the API's quota_remaining is below the floor
+        """
         page = 1
         while True:
+            blocked = self.spend_block()
+            if blocked:
+                self.stop_reason = blocked
+                return
             data = drop_user_fields(self.fetch_page(path, {**params, "page": page, "pagesize": PAGE_SIZE}))
             self.save_raw(kind, data)
             yield from data.get("items", [])
             if not data.get("has_more"):
+                self.stop_reason = "done"
                 return
             if max_pages and page >= max_pages:
-                print(f"  {kind}: stopped at the page cap ({max_pages}); the next run continues from the watermark")
-                return
-            if self.quota_low():
-                print(f"  {kind}: stopping early, only {self.quota_remaining} requests of quota left")
+                self.stop_reason = "page_cap"
                 return
             page += 1
 
 
-def extract_questions(client, min_epoch):
-    params = {"sort": "activity", "order": "asc", "min": min_epoch, "filter": client.filter}
-    return list(client.paginate("questions", params, "questions", client.config.max_pages))
+def fetch_question_batch(client, params, pages):
+    """Up to `pages` pages of questions from page 1. Returns (items, stop_reason).
+
+    stop_reason "page_cap" means the API has more beyond this batch; anything else means the
+    stream ended (done) or ran out of budget/quota. Pages arrive in sort order, so a batch cut
+    short by budget or quota is still a contiguous prefix and safe to load.
+    """
+    blocked = client.spend_block()   # building the filter costs a request too
+    if blocked:
+        client.stop_reason = blocked
+        return [], blocked
+    items = list(client.paginate("questions", {**params, "filter": client.ensure_filter()},
+                                 "questions", max_pages=pages))
+    return items, client.stop_reason
 
 
 def extract_answers(client, question_ids):
+    """Answers for the given questions. Returns (answers, complete).
+
+    complete is False if the budget or quota ran out first. The caller must then not load
+    the batch, so no question is stored without its answers.
+    """
     answers = []
     for i in range(0, len(question_ids), 100):
-        if client.quota_low():
-            print(f"  answers: stopping early, only {client.quota_remaining} requests of quota left")
-            break
+        blocked = client.spend_block()
+        if blocked:
+            client.stop_reason = blocked
+            return answers, False
         ids = ";".join(str(q) for q in question_ids[i:i + 100])
-        params = {"sort": "creation", "order": "asc", "filter": client.filter}
+        params = {"sort": "creation", "order": "asc", "filter": client.ensure_filter()}
         answers += client.paginate(f"questions/{ids}/answers", params, "answers")
-    return answers
+        if client.stop_reason != "done":
+            return answers, False
+    return answers, True
 
 
 def _months(start, end):
@@ -228,114 +301,49 @@ def _months(start, end):
         month = nxt
 
 
-def extract_monthly_counts(client, since_month):
-    """Question counts per month, site-wide and per tracked tag, one request each (filter=total)."""
+def months_to_fetch(existing, start, now, scopes, refresh_partial=False):
+    """Which (scope, month_start, next_month_start) counts still need an API request.
+
+    existing maps (scope, date of first of month) -> is_partial_month for rows already stored.
+    A pair is fetched if it is not stored. A stored partial month is fetched again once that
+    month has ended, or always when refresh_partial is True (update refreshes the current month).
+    Months already stored as complete are never fetched again.
+    """
+    todo = []
+    for month, nxt in _months(start, now):
+        for scope in scopes:
+            stored = existing.get((scope, month.date()))
+            if stored is None or (stored and (refresh_partial or nxt <= now)):
+                todo.append((scope, month, nxt))
+    return todo
+
+
+def extract_monthly_counts(client, todo, now=None):
+    """Question counts for each (scope, month, next_month) in todo, one request each.
+
+    Returns (counts, complete); complete is False if budget or quota ran out first.
+    """
+    now = now or datetime.now(timezone.utc)
     counts = []
-    now = datetime.now(timezone.utc)
-    for month, nxt in _months(since_month, now):
-        for tag in [None] + client.config.tracked_tags:
-            if client.quota_low():
-                print(f"  monthly counts: stopping early, only {client.quota_remaining} requests of quota left")
-                client.save_raw("counts", counts)
-                return counts
-            params = {"fromdate": int(month.timestamp()), "todate": int(nxt.timestamp()) - 1,
-                      "filter": "total"}
-            if tag:
-                params["tagged"] = tag
-            data = client.fetch_page("questions", params)
-            counts.append({"scope": tag or "site", "month": month.strftime("%Y-%m"),
-                           "question_count": data.get("total"), "is_partial_month": nxt > now})
-    client.save_raw("counts", counts)
-    return counts
-
-
-# --- watermark, stored in Postgres ---------------------------------------------------
-
-def state_key(site):
-    return f"{site}:questions"
-
-
-def get_watermark(engine, site):
-    """Latest last_activity_date already loaded, or None on a first run."""
-    from sqlalchemy import text
-    from sqlalchemy.exc import OperationalError, ProgrammingError
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(text("SELECT last_activity_epoch FROM etl_state WHERE source = :s"),
-                               {"s": state_key(site)}).fetchone()
-    except ProgrammingError:
-        return None  # etl_state not created yet: first run
-    except OperationalError as e:
-        raise ExtractError(f"could not connect to Postgres ({str(e.orig).strip().splitlines()[0]})")
-    return row[0] if row else None
-
-
-def save_watermark(engine, site, epoch):
-    """Call only after load has committed, so a failed load is retried on the next run."""
-    from sqlalchemy import text
-    with engine.begin() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS etl_state (
-                source VARCHAR(100) PRIMARY KEY,
-                last_activity_epoch BIGINT NOT NULL,
-                last_run_at TIMESTAMPTZ NOT NULL)"""))
-        conn.execute(text("""
-            INSERT INTO etl_state (source, last_activity_epoch, last_run_at)
-            VALUES (:s, :e, now())
-            ON CONFLICT (source) DO UPDATE
-            SET last_activity_epoch = EXCLUDED.last_activity_epoch,
-                last_run_at = EXCLUDED.last_run_at"""),
-            {"s": state_key(site), "e": epoch})
-
-
-# --- orchestration --------------------------------------------------------------------
-
-def extract(engine=None, since=None, skip_counts=False, config=None):
-    """Run every stream. `since` (a datetime) overrides the stored watermark."""
-    config = config or load_config()
-    if not config.key:
-        print("  warning: SE_API_KEY is blank, so requests are anonymous (300/day). "
-              "See docs/stack-exchange-api-key-tutorial.md.")
-
-    if since is not None:
-        since_epoch = int(since.timestamp())
-    else:
-        watermark = get_watermark(engine, config.site) if engine is not None else None
-        since_epoch = watermark - OVERLAP_SECONDS if watermark is not None else None
-    first_run = since_epoch is None
-    min_epoch = int(config.start_date.timestamp()) if first_run else since_epoch
-
-    raw_dir = RAW_ROOT / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    client = Client(config, raw_dir)
-    client.build_filter()
-
-    questions = extract_questions(client, min_epoch)
-    answered = sorted({q["question_id"] for q in questions if q.get("answer_count")})
-    answers = extract_answers(client, answered)
-
-    counts = []
-    if not skip_counts:
-        if first_run:
-            counts_from = config.history_start
-        else:  # refresh the previous and current month only
-            this_month = datetime.fromtimestamp(since_epoch, timezone.utc).replace(day=1)
-            counts_from = (this_month - timedelta(days=1)).replace(day=1)
-        counts = extract_monthly_counts(client, counts_from)
-
-    result = ExtractResult(
-        questions=questions, answers=answers, monthly_counts=counts,
-        since_epoch=since_epoch,
-        max_activity_epoch=max((q["last_activity_date"] for q in questions), default=None),
-        pages_fetched=client.pages_fetched, quota_remaining=client.quota_remaining,
-        raw_dir=str(raw_dir),
-    )
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    (raw_dir / "run.json").write_text(json.dumps({
-        "site": config.site, "since_epoch": since_epoch, "min_epoch": min_epoch,
-        "max_activity_epoch": result.max_activity_epoch, "pages_fetched": result.pages_fetched,
-        "quota_remaining": result.quota_remaining,
-    }, indent=2), encoding="utf-8")
-    return result
+    complete = True
+    for scope, month, nxt in todo:
+        blocked = client.spend_block()
+        if blocked:
+            client.stop_reason = blocked
+            complete = False
+            break
+        params = {"fromdate": int(month.timestamp()), "todate": int(nxt.timestamp()) - 1,
+                  "filter": "total"}
+        if scope != "site":
+            params["tagged"] = scope
+        data = client.fetch_page("questions", params)
+        counts.append({"scope": scope, "month": month.strftime("%Y-%m"),
+                       "question_count": data.get("total"), "is_partial_month": nxt > now})
+    if complete:
+        client.stop_reason = "done"
+    if counts:
+        client.save_raw("counts", counts)
+    return counts, complete
 
 
 def load_raw(raw_dir):
@@ -370,23 +378,32 @@ def summary_lines(result):
     ]
 
 
+def quick_check(since):
+    """One page of questions active since `since`, no database. A fast way to test a key."""
+    config = load_config()
+    client = Client(config, RAW_ROOT / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    params = {"sort": "activity", "order": "asc", "min": int(since.timestamp())}
+    questions, reason = fetch_question_batch(client, params, 1)
+    answered = sorted({q["question_id"] for q in questions if q.get("answer_count")})
+    answers, _ = extract_answers(client, answered)
+    return ExtractResult(questions=questions, answers=answers, since_epoch=int(since.timestamp()),
+                         pages_fetched=client.pages_fetched, quota_remaining=client.quota_remaining,
+                         raw_dir=str(client.raw_dir))
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Extract Stack Exchange data (no user data).")
-    parser.add_argument("--since", help="YYYY-MM-DD; overrides the watermark stored in Postgres")
+    parser = argparse.ArgumentParser(description="Extract Stack Exchange data (no user data). "
+                                     "The full pipeline is fill.py and update.py.")
+    parser.add_argument("--since", help="YYYY-MM-DD: quick check, fetch one page of questions active since then")
     parser.add_argument("--from-raw", help="replay a saved run from data/raw/<stamp> without calling the API")
-    parser.add_argument("--no-db", action="store_true", help="don't read the watermark from Postgres")
-    parser.add_argument("--skip-counts", action="store_true", help="skip the monthly counts stream")
     args = parser.parse_args(argv)
     try:
         if args.from_raw:
             result = load_raw(args.from_raw)
+        elif args.since:
+            result = quick_check(_parse_date(args.since, "--since"))
         else:
-            engine = None
-            if not args.no_db:
-                from db import get_engine
-                engine = get_engine()
-            since = _parse_date(args.since, "--since") if args.since else None
-            result = extract(engine, since=since, skip_counts=args.skip_counts)
+            parser.error("give --since YYYY-MM-DD or --from-raw <dir>")
     except (ExtractError, RuntimeError) as e:
         print(f"Extract failed: {e}", file=sys.stderr)
         return 1

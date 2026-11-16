@@ -29,6 +29,9 @@ def get_url():
         host=os.getenv("POSTGRES_HOST", "db"),
         port=int(os.getenv("POSTGRES_PORT", "5432")),
         database=os.environ["POSTGRES_DB"],
+        # Set explicitly so Neon-style PGSSLMODE / PGCHANNELBINDING = require in .env can't
+        # break the local container, which has no SSL.
+        query={"sslmode": os.getenv("POSTGRES_SSLMODE", "prefer"), "channel_binding": "prefer"},
     )
 
 

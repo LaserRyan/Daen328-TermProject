@@ -98,42 +98,28 @@ These sit between extract's "received from API" lines and load's inserted/update
 ```bash
 python transform.py data/raw/<run_stamp>        # clean a saved extract run, no API or DB
 pytest tests/test_transform.py                  # locally
-docker-compose run --rm etl pytest              # how the TA runs it
+docker compose run --rm fill pytest              # how the TA runs it
 ```
 
 ## 6. Moving forward
 
-### Phase A: working pipeline (current priority)
+### Phase A: working pipeline
 
-- [ ] **Run script (`etl.py`), owner TBD.** It calls `extract()`, then `transform()`, then load, then `save_watermark()` *after* load commits, then prints all three summaries. The `etl` container's default command should run it.
-- [ ] **Load (David).** Create tables from our own SQL, using the column types above, and upsert each DataFrame. Convert pandas `NA`/`NaT` to `None` before passing rows to psycopg2. Answers can reference questions loaded in earlier runs, so don't require the question to be in the same batch.
-- [ ] **Docker (Jonathan).** Run the tests inside the container. They were only checked on pandas 3, and `python:3.10` installs pandas 2.x, so confirm they pass there or use `python:3.11+`.
-- [ ] **Dashboard (everyone).** Q1/Q2 read from `tag_monthly_counts`, and Q3–Q5 read from `questions` + `question_tags` + `answers`. Remember the `is_duplicate_closure` filter and the partial current month.
-- [ ] **README.** Copy the incremental-pull section, ERD and dashboard screenshot into the main README.
+- [x] **Run scripts.** `fill.py` and `update.py` (shared logic in `etl_common.py`) run extract, transform, load in batches and write the cursor in the load transaction.
+- [x] **Load (David).** See the README "Load layer".
+- [x] **Docker.** `Dockerfile` (Python 3.12, pinned requirements) and `docker-compose.yml` with `db`, `fill` and `update`. Tests run with `docker compose run --rm fill pytest`.
+- [ ] **Dashboard (everyone).** Q1/Q2 read from `tag_monthly_counts`, and Q3-Q5 read from `questions` + `question_tags` + `answers`. Remember the `is_duplicate_closure` filter and the partial current month.
+- [x] **README.** Incremental pulls, idempotency and the team workflow are in the main README. Dashboard screenshot still to do.
 
-### Phase B: pulling more data with all four of us (after the pipeline works)
+### Phase B: pulling more data with all four of us
 
-Goal: go well beyond the 60-day / 300-page window by splitting the pull across four people.
-Transform needs no changes for this, because dedupe and upserts make any overlap harmless.
-
-- **Split by creation date, not activity.** Each person takes a date range (e.g. by year) and pulls with
-  `fromdate`/`todate` on `creation_date`. This needs a small "backfill" mode in extract that is separate
-  from the activity watermark, so ranges don't interfere with the normal incremental run.
-- **Own key and own network for each person.** The quota (10,000/day) is per key **and** IP, so four people on
-  the same campus Wi-Fi share one quota.
-- **Pull distributed, load centralized.** Each person only extracts and saves raw files (`data/raw/<run>`);
-  one person replays them all with `--from-raw` into the main database, which costs zero API calls.
-  Alternatively, use a shared hosted Postgres, but the raw-file route is simpler.
-- **Track progress per range** in `etl_state` (e.g. `source = "stackoverflow:backfill:2023"`), so a range
-  stopped by quota resumes where it left off.
-- **Answers cost extra requests** (about 1 per 100 answered questions), so budget roughly 2 requests per
-  100 questions when planning how far back each person can go per day.
+Done by the same two jobs: each person runs `fill` with their own key and network, and the backfill cursor in the shared database means the next run continues where the last one stopped. Transform needs no changes, because dedupe and guarded upserts make any overlap harmless. Budget roughly 2 requests per 100 answered questions for answers on top of the question pages.
 
 ### Open team decisions
 
 1. Keep or exclude questions closed as duplicates? (Currently kept and flagged.)
 2. The final `SE_TRACKED_TAGS` list. Monthly counts only exist for these tags.
-3. The row-level window (`SE_START_DATE`) for Q3–Q5.
+3. The row-level window (`SE_BACKFILL_FLOOR`) for Q3–Q5, limited by how much data our Neon plan can hold.
 
 ### Possible improvements if there's time
 

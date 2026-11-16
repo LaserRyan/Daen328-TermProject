@@ -1,44 +1,87 @@
 # Running the pipeline with Docker
 
-For everyone on the team. You only need Docker: no Python, no packages. (The dashboard will get its own
-service later; the files here only cover the database and the two pipeline jobs.)
+For everyone on the team (and graders). You only need Docker: no Python, no packages. You can point the
+pipeline at either of two databases, set in `.env`:
+
+| Setup | Database | Use it for |
+|---|---|---|
+| **A. Neon** | our shared hosted PostgreSQL | day-to-day team work: everyone builds the dashboard on the same data |
+| **B. Local** | a PostgreSQL container on your own machine | graders, trying it out, or working offline |
+
+The commands are identical for both; only `.env` (and one extra start command for local) differs.
 
 | Service | What it is | Starts when |
 |---|---|---|
-| `db` | local PostgreSQL 16 with a saved volume | automatically, whenever a job needs it |
 | `fill` | pulls Stack Overflow data the database doesn't have yet | you run it |
 | `update` | upserts questions that changed since the last run | you run it |
 | `status` | read-only report of what is in the database and what the last runs did | you run it |
+| `db` | the local PostgreSQL for setup B | you start it with `--profile local` |
 
 `fill`, `update` and `status` are one-shot containers: they run, print a summary and exit.
 How the jobs work (cursors, idempotency, budget) is in the [README](../README.md#incremental-pulls-and-idempotency).
+The dashboard will get its own service later.
 
-## 1. One-time setup
+## 1. One-time setup (both setups)
 
 1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and start it (wait until it says "running").
-2. Get your own Stack Exchange API key: [stack-exchange-api-key-tutorial.md](stack-exchange-api-key-tutorial.md).
-3. In the repo folder, copy the sample settings and fill them in:
+2. Get **your own** Stack Exchange API key: [stack-exchange-api-key-tutorial.md](stack-exchange-api-key-tutorial.md).
+3. In the repo folder, copy the sample settings:
 
    ```bash
    cp .env.sample .env          # Windows PowerShell: Copy-Item .env.sample .env
    ```
+4. Edit `.env` (private and git-ignored; never commit it or paste your key anywhere). Set `SE_API_KEY=` to your
+   key, then follow **one** of the two setups below. Everything else can stay as it is; each variable is explained
+   in `.env.sample`.
 
-   `.env` is private and git-ignored. Never commit it or paste your key anywhere. Pick **one** of these two setups:
+### Setup A: Neon (shared team database)
 
-   **A. Local database** (graders, or trying it out). Set `SE_API_KEY`, then choose any `POSTGRES_USER` and
-   `POSTGRES_PASSWORD`. Leave `DATABASE_URL` blank. The data lives in a Docker volume on your machine.
+In `.env`, set `DATABASE_URL=` to the team's Neon connection string (ask Carson). Use the **direct** string, whose
+host does **not** contain `-pooler`: the pipeline creates tables and takes a database lock, which a pooled
+connection doesn't support. It looks like
+`postgresql://user:password@ep-xxxx.region.aws.neon.tech/dbname?sslmode=require`.
 
-   **B. The team's shared Neon database.** Set `SE_API_KEY` and paste the team's **direct** connection string
-   into `DATABASE_URL` (the host must *not* contain `-pooler`; ask Carson for it). You don't need the
-   `POSTGRES_*` values. Add `--no-deps` to every command below so the local `db` isn't started
-   (e.g. `docker compose run --rm --no-deps fill`).
+You don't need the `POSTGRES_*` values, and Neon's other format (`PGHOST`, `PGUSER`, ... lines) is ignored.
+There is no database container to start. Check the connection:
 
-   Other `.env` variables you may care about: `SE_MAX_REQUESTS` (API calls per run, default 10,000) and
-   `SE_BACKFILL_FLOOR` (how far back `fill` goes). All of them are explained in `.env.sample`.
+```bash
+docker compose run --rm status
+```
 
-## 2. Commands
+The first run builds the image (a couple of minutes), then prints `Database: ep-xxxx.../dbname`.
 
-Run these from the repo folder. The first run builds the image, which takes a couple of minutes.
+Neon specifics: the database is shared, so cursors and data are shared too (that's the point: see
+[Sharing the daily quota](#3-typical-workflows)). A free Neon database pauses when idle, so the first connection
+after a quiet spell can take a few seconds. Neon's plan has a size limit; see "Storage" below.
+
+### Setup B: Local database
+
+In `.env`, leave `DATABASE_URL=` **blank** and set `POSTGRES_USER=` and `POSTGRES_PASSWORD=` (any values you like;
+`POSTGRES_DB` can stay `stackexchange`). Then start the database container once:
+
+```bash
+docker compose --profile local up -d --wait db
+```
+
+After that the same `fill` / `update` / `status` commands use it. Check:
+
+```bash
+docker compose run --rm status
+```
+
+which prints `Database: db/stackexchange`. Local specifics:
+
+- The data lives in a Docker volume (`pgdata`) on your machine and survives restarts. It starts **empty**, with its
+  own cursors, so your first `fill` starts from scratch. It is completely separate from Neon.
+- Stop it with `docker compose --profile local stop db`; start it again with the `up` command above.
+- **Wipe it** (data and cursors) with `docker compose --profile local down -v`.
+- SQL prompt: `docker compose exec db psql -U <your POSTGRES_USER> -d stackexchange`.
+- It listens on port 5432 of your machine. If that is taken, set `POSTGRES_PORT_ON_HOST=5433` in `.env` and
+  start it again.
+
+## 2. Commands (both setups)
+
+Run these from the repo folder.
 
 | I want to... | Command |
 |---|---|
@@ -46,29 +89,35 @@ Run these from the repo folder. The first run builds the image, which takes a co
 | Pull a small test amount (100 API calls) | `docker compose run --rm fill python fill.py --max-requests 100` |
 | Pick up what changed since the last run | `docker compose run --rm update` |
 | See what's in the database and what happened | `docker compose run --rm status` |
-| Run the tests | `docker compose run --rm fill pytest` |
+| Run the tests (no database needed) | `docker compose run --rm fill pytest` |
 | Run a long job in the background | `docker compose run -d --rm --name fill_run fill` then `docker logs -f fill_run` |
-| Open a SQL prompt (local database) | `docker compose exec db psql -U <your POSTGRES_USER> -d stackexchange` |
-| Stop a background job | `docker stop fill_run` (it is safe: see "Interrupted runs" below) |
-| Start over with an empty local database | `docker compose down -v` (deletes the local data; also deletes the saved cursors) |
+| Stop a background job | `docker stop fill_run` (safe: see [Interrupted runs](#6-interrupted-runs)) |
+| Rebuild after code changes (e.g. after a `git pull`) | `docker compose --profile "*" build` |
 
-Windows tip: put the options *after* the service as in the table (`fill python fill.py --max-requests 100`).
+Windows tip: put options *after* the service, as in the table (`fill python fill.py --max-requests 100`).
 Setting a variable in front of the command (`SE_MAX_REQUESTS=100 docker compose ...`) doesn't work in PowerShell.
 
 ## 3. Typical workflows
 
-**First time, local database.** Run `docker compose run --rm fill` and repeat it until the summary says
-`reached SE_BACKFILL_FLOOR, nothing left to fill`. Each run spends up to `SE_MAX_REQUESTS` API calls and picks
-up exactly where the last one stopped. Then use `update` to keep current.
+**Sharing the daily quota (Neon).** Each person has about 10,000 API calls a day on their own key and their own
+network (the limit is per key *and* IP, so two people on the same campus Wi-Fi share one). A run spends at most
+`SE_MAX_REQUESTS` calls (default 10,000) and then stops cleanly. The cursors live in the database, so the next person
+just runs `docker compose run --rm fill` and it continues where the last person's budget ran out. Run `status` first
+to see where things stand. (With a local database the same applies, but it's just you.)
 
-**Sharing the daily quota on Neon.** Each person has about 10,000 API calls a day on their own key and
-their own network (the limit is per key *and* IP, so two people on the same campus Wi-Fi share one). The
-cursors live in the database, so the next person simply runs `docker compose run --rm --no-deps fill` and it
-continues where the last person's budget ran out. Run `status` first if you want to see where things stand.
+**Filling up.** Repeat `fill` (one run per person per day) until the summary says
+`reached SE_BACKFILL_FLOOR, nothing left to fill`.
+
+**Staying current.** Run `update` whenever you want fresh data. It only fetches questions that changed since
+the last update (and refreshes the current month's counts), so it is cheap. It needs at least one `fill` first.
 
 **One run at a time.** A run holds a database lock. If you see
-`another run is in progress against this database`, someone (maybe you, in another window) is running; wait
-for them to finish. `status` shows `Run in progress: YES` while a run is active.
+`another run is in progress against this database`, a teammate (or you, in another window) is running; wait for
+them to finish. `status` shows `Run in progress: YES` while a run is active.
+
+**Storage.** A full 10,000-call `fill` adds a lot of rows (very roughly half a million questions plus their
+answers). Local disks cope; Neon's plan has a size limit. Don't move `SE_BACKFILL_FLOOR` earlier on Neon without
+checking with the team how much room is left.
 
 ## 4. Reading the output
 
@@ -85,59 +134,62 @@ cursors are. The stop reasons:
 | Reason | Meaning | What to do |
 |---|---|---|
 | finished, nothing more to fetch | caught up | nothing |
-| request budget spent | used all `SE_MAX_REQUESTS` calls | run it again (tomorrow, or someone else) |
+| request budget spent | used all `SE_MAX_REQUESTS` calls | run it again (tomorrow, or a teammate) |
 | API quota nearly used up | Stack Exchange says the key is nearly out for the day | wait for the daily reset |
 | reached `SE_BACKFILL_FLOOR` | `fill` has everything back to the floor | nothing; use `update` |
 | stopped at the page cap | `update` hit `SE_MAX_PAGES` | run `update` again |
 | last batch dropped | the budget ran out before a batch's answers were fetched, so it wasn't loaded | nothing: it is fetched again next run |
 
-`Stack Exchange throttle` retries (`retrying ... throttle_violation`) are normal now and then; the job waits
-out the API's backoff and carries on.
+`retrying ... throttle_violation` lines are normal now and then; the job waits out the API's backoff and
+carries on.
 
 ## 5. Monitoring
 
-- **`docker compose run --rm status`** shows whether a run is active, both cursors, row counts per table, how
-  far back the data reaches, and the last runs (when, how long, requests used, why each stopped, any error).
-  A run whose process was killed shows as `interrupted`.
+- **`docker compose run --rm status`** shows whether a run is active (yours or a teammate's), both cursors, row
+  counts per table, how far back the data reaches, and the last runs (when, how long, requests used, why each
+  stopped, any error). A run whose process was killed shows as `interrupted`.
 - **`docker logs -f <container>`** follows a background job live.
-- **`etl_runs`** is the same run history as a table, so you can query it:
+- **`etl_runs`** is the same run history as a table. Query it in Neon's SQL editor, `psql`, or any SQL client:
 
   ```sql
   SELECT run_id, job, started_at, status, requests_used, requests_budget, stops, error
   FROM etl_runs ORDER BY run_id DESC LIMIT 10;
   ```
-- **`data/raw/<timestamp>/`** keeps the raw API pages of every run (without user data). You can replay one into
-  the database without any API calls: `docker compose run --rm fill python load.py data/raw/<timestamp>`.
-  These folders are git-ignored and can get large (hundreds of MB after a full run); delete old ones freely.
+- **`data/raw/<timestamp>/`** (on your machine) keeps the raw API pages of every run, without user data. You can
+  replay one into the database without any API calls:
+  `docker compose run --rm fill python load.py data/raw/<timestamp>`. These folders are git-ignored and can get
+  large (hundreds of MB after a full run); delete old ones freely.
 
 ## 6. Interrupted runs
 
-Stopping a job (`docker stop`, Ctrl-C, closing the laptop) is safe. Every batch is saved together with its
-cursor in one transaction, so at most the batch in progress is lost, and the next run redoes it. Nothing is
-duplicated, because every write is an upsert.
+Stopping a job (`docker stop`, Ctrl-C, closing the laptop, losing Wi-Fi) is safe. Every batch is saved together
+with its cursor in one transaction, so at most the batch in progress is lost, and the next run redoes it.
+Nothing is duplicated, because every write is an upsert. If a run dies without cleaning up, the database lock
+is released automatically when its connection drops.
 
 ## 7. Troubleshooting
 
-| You see | Cause and fix |
-|---|---|
-| `failed to connect to the docker API` / `cannot find the file specified` | Docker Desktop isn't running. Start it and wait for "running". |
-| `missing in .env: POSTGRES_USER...` | Setup A needs `POSTGRES_USER` and `POSTGRES_PASSWORD` in `.env` (or set `DATABASE_URL`). |
-| `could not connect to Postgres (...)` | Local: run `docker compose up -d db` and try again. Neon: check `DATABASE_URL` is the direct string and you used `--no-deps`. |
-| `SE_API_KEY is blank` warning | Anonymous calls are capped at 300 a day. Add your key to `.env`. |
-| `API error ... No site found` | `SE_SITE` in `.env` is wrong (it should be `stackoverflow`). |
-| `another run is in progress` | See "One run at a time" above. |
-| `nothing to update yet: run fill first` | `update` needs `fill` to have run once. |
-| `port is already allocated` on 5432 | Something else uses 5432. Set `POSTGRES_PORT_ON_HOST=5433` in `.env`. |
-| Edited code but the container behaves the same | Rebuild: `docker compose --profile "*" build`. |
-| Old `PG*` Neon variables in `.env` | Harmless. The pipeline reads `DATABASE_URL`, not `PGHOST` and friends. |
+| You see | Setup | Cause and fix |
+|---|---|---|
+| `failed to connect to the docker API` / `cannot find the file specified` | both | Docker Desktop isn't running. Start it and wait for "running". |
+| `missing in .env: POSTGRES_USER...` | A | `DATABASE_URL` is blank, so it fell back to the local database. Paste the Neon string into `.env`. |
+| `could not connect to Postgres (...)` | A | Check `DATABASE_URL`: direct string (no `-pooler`), password correct, no stray quotes or spaces. If Neon was idle, retry after a few seconds. |
+| `could not translate host name "db"` or `connection refused` | B | The local database isn't running. Start it: `docker compose --profile local up -d --wait db`. |
+| `missing in .env: POSTGRES_USER, POSTGRES_PASSWORD` | B | Set both in `.env` (and leave `DATABASE_URL` blank). |
+| `password authentication failed` | B | The volume was created with different credentials. Use the original ones, or wipe it: `docker compose --profile local down -v`. |
+| `port is already allocated` on 5432 | B | Set `POSTGRES_PORT_ON_HOST=5433` in `.env` and start it again. |
+| `SE_API_KEY is blank` warning | both | Anonymous calls are capped at 300 a day. Add your key to `.env`. |
+| `API error ... No site found` | both | `SE_SITE` in `.env` is wrong (it should be `stackoverflow`). |
+| `another run is in progress` | both | See "One run at a time" above. |
+| `nothing to update yet: run fill first` | both | `update` needs `fill` to have run once against this database. |
+| Edited code but the container behaves the same | both | Rebuild: `docker compose --profile "*" build`. |
 
 ## 8. How it's put together
 
-- One `Dockerfile` (Python 3.12, pinned `requirements.txt`) builds the image all three jobs share. The
+- One `Dockerfile` (Python 3.12, pinned `requirements.txt`) builds the image the three jobs share. The
   `docker-compose.yml` picks the job with `command:`.
-- `fill`, `update` and `status` sit behind compose *profiles*, so a plain `docker compose up` starts only the
-  database and the jobs never run at the same time by accident.
-- Inside compose the database host is always `db`, whatever `.env` says. `DATABASE_URL`, when set, wins.
-- `.env` is passed in at run time and is never copied into the image (`.dockerignore`).
+- `fill`, `update` and `status` sit behind compose *profiles*, so a plain `docker compose up` never starts a job.
+  The local `db` sits behind the `local` profile, so Neon users never start it.
+- `.env` is passed in at run time and is never copied into the image (`.dockerignore`). `DATABASE_URL`, when set,
+  wins over the `POSTGRES_*` values. Inside compose the local database's host is always `db`.
 - `./data` is mounted into the containers, so raw API pages survive after a container exits.
-- The database healthcheck makes jobs wait until Postgres is ready.

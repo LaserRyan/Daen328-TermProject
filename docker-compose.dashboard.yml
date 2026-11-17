@@ -1,0 +1,17 @@
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    image: stackexchange-dashboard
+    profiles: ["dashboard"]
+    env_file: .env
+    environment:
+      # Same override the pipeline jobs use for the local database.
+      POSTGRES_HOST: db
+      POSTGRES_USER: ${POSTGRES_USER:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-stackexchange}
+    ports:
+      - "8501:8501"
+    restart: "no"

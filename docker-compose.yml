@@ -1,28 +1,27 @@
-# Services:
-#   db      local PostgreSQL (used when DATABASE_URL in .env is blank)
-#   fill    pulls data the database doesn't have yet; run it until it says nothing is left
-#   update  upserts questions that changed since the last run
-# fill and update sit behind profiles, so a plain `docker compose up` only starts the database
-# and the two jobs never run at once (they share one database lock anyway). Run them with:
-#   docker compose run --rm fill
-#   docker compose run --rm update
-#   docker compose run --rm status       (what is in the database, what the last runs did)
-# With a Neon DATABASE_URL, add --no-deps so the local db isn't started:
-#   docker compose run --rm --no-deps fill
+# Two ways to run (details in docs/docker.md):
+#   A. Neon (shared team database): set DATABASE_URL in .env and just run the jobs below.
+#   B. Local database: leave DATABASE_URL blank, set POSTGRES_USER/POSTGRES_PASSWORD, and start it once:
+#        docker compose --profile local up -d --wait db
+#
+#   docker compose run --rm fill         pull data the database doesn't have yet
+#   docker compose run --rm update       upsert questions that changed since the last run
+#   docker compose run --rm status       what is in the database, what the last runs did
+#
+# fill, update and status sit behind profiles, so a plain `docker compose up` never starts a job
+# (the two jobs share one database lock anyway).
 # A dashboard service gets added here later.
 
 x-job: &job
   build: .
+  image: stackexchange-pipeline   # one shared image, so rebuilding any job updates all three
   env_file: .env
-  # Inside compose the database host is the service name, whatever .env says for local runs.
+  # DATABASE_URL (Neon) wins when set. Otherwise the jobs use the optional local `db` service,
+  # whose host name inside compose is always `db`, whatever .env says.
   environment:
     POSTGRES_HOST: db
     POSTGRES_USER: ${POSTGRES_USER:-}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
     POSTGRES_DB: ${POSTGRES_DB:-stackexchange}
-  depends_on:
-    db:
-      condition: service_healthy
   volumes:
     - ./data:/app/data     # raw API pages, so a run can be replayed without API calls
   restart: "no"
@@ -30,16 +29,17 @@ x-job: &job
 services:
   db:
     image: postgres:16
+    profiles: ["local"]      # opt-in: not needed when using Neon
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       POSTGRES_DB: ${POSTGRES_DB:-stackexchange}
     ports:
       - "${POSTGRES_PORT_ON_HOST:-5432}:5432"   # change if 5432 is taken on your machine
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-stackexchange}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-} -d ${POSTGRES_DB:-stackexchange}"]
       interval: 5s
       timeout: 5s
       retries: 10

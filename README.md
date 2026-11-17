@@ -34,9 +34,23 @@ Dockerfile, docker-compose.yml                                                (J
 
 ## Run it
 
-1. Get a free API key: [docs/stack-exchange-api-key-tutorial.md](docs/stack-exchange-api-key-tutorial.md).
-2. `cp .env.sample .env` and fill in `SE_API_KEY` and the `POSTGRES_*` values.
-3. Fill the database (repeat until it says there is nothing left to fill):
+You only need Docker; there is nothing to install for Python. Pick a database in `.env`:
+
+| Setup | Database | Use it for |
+|---|---|---|
+| **A. Neon** | our shared hosted PostgreSQL | the team: everyone builds the dashboard on the same data |
+| **B. Local** | a PostgreSQL container on your machine | graders, trying it out, working offline |
+
+1. Get your own free API key: [docs/stack-exchange-api-key-tutorial.md](docs/stack-exchange-api-key-tutorial.md).
+2. `cp .env.sample .env`, then set `SE_API_KEY` (yours) and **one** of:
+   - **A. Neon:** the team's Neon details (ask Carson), either as one `DATABASE_URL` line or as the separate
+     `PGHOST`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`/`PGSSLMODE`/`PGCHANNELBINDING` lines Neon's "Connect" dialog gives
+     you. A pooled host (`-pooler`) is switched to the direct one automatically. Nothing else to start.
+   - **B. Local:** leave `DATABASE_URL` blank, set `POSTGRES_USER` and `POSTGRES_PASSWORD` (any values), then start
+     the database once: `docker compose --profile local up -d --wait db`.
+
+   `.env` is git-ignored; never commit it.
+3. Pull data (repeat until it says there is nothing left to fill):
 
    ```bash
    docker compose run --rm fill
@@ -52,16 +66,11 @@ Dockerfile, docker-compose.yml                                                (J
    docker compose run --rm status
    ```
 
-Run the tests with `docker compose run --rm fill pytest`. A dashboard service gets added to
-`docker-compose.yml` later; `docker compose up` currently starts only the database.
-**Full Docker guide for the team** (setup, all commands, monitoring, troubleshooting):
-[docs/docker.md](docs/docker.md).
+Run the tests with `docker compose run --rm fill pytest`. **Full Docker guide** for both setups (all commands,
+monitoring, troubleshooting): [docs/docker.md](docs/docker.md). A dashboard service gets added to `docker-compose.yml` later.
 
 Every run prints a timestamped line per batch while it works and records itself in the `etl_runs` table
 (when, requests used, why it stopped, any error), which `status` displays.
-
-If `DATABASE_URL` is set (Neon), add `--no-deps` so the local `db` container isn't started:
-`docker compose run --rm --no-deps fill`.
 
 ### The two containers
 
@@ -78,30 +87,33 @@ and `update` walks forward from it, so together they cover everything with no ga
 ### Team pull workflow (sharing the 10,000-call daily quota)
 
 Every run spends at most `SE_MAX_REQUESTS` API calls (default 10,000, the daily limit for one key).
-The cursors are stored in the shared database, so when one person's budget runs out, the next person's
-run continues from there:
+The cursors are stored in the database, so on the shared Neon database, when one person's budget runs out,
+the next person's run continues from there:
 
-1. Use **your own** `SE_API_KEY`, and your own network (the quota is per key *and* IP, so teammates on
+1. Use **your own** `SE_API_KEY` and your own network (the quota is per key *and* IP, so teammates on
    the same campus Wi-Fi share one quota).
-2. Put the team's **direct** Neon connection string in `DATABASE_URL`.
-3. `docker compose run --rm --no-deps fill`. It prints how many requests it used and where the cursors are.
-4. Next person repeats steps 1-3 the next day.
+2. `docker compose run --rm fill`. It prints how many requests it used and where the cursors are.
+3. The next person repeats step 2 the next day.
 
-If someone else's run is in progress you get `another run is in progress against this database`; wait
-and run again. Before moving `SE_BACKFILL_FLOOR` earlier, check how much data your Neon plan can hold.
+Only one run can write at a time. If someone else's run is in progress you get
+`another run is in progress against this database`; wait and run again. Before moving
+`SE_BACKFILL_FLOOR` earlier, check how much data our Neon plan can hold.
 
-### Where the data goes: local Postgres or Neon
+### Neon or local: what differs
 
-`db.py` picks the database from `.env`:
+`db.py` picks the database from `.env`, first match wins: `DATABASE_URL`, then Neon's `PGHOST` lines, then the
+local `POSTGRES_*` values.
 
-| `DATABASE_URL` in `.env` | Database used | Who uses it |
+| | A. Neon | B. Local |
 |---|---|---|
-| blank (default) | the `db` Postgres container in docker-compose, built from the `POSTGRES_*` values | graders, and anyone running the project from scratch |
-| a Neon connection string | our shared Neon database | the team, so everyone builds the dashboard on the same data |
+| `.env` | `DATABASE_URL`, or Neon's `PGHOST`/`PGUSER`/... lines | `POSTGRES_USER`, `POSTGRES_PASSWORD` (no `DATABASE_URL`/`PGHOST`) |
+| Start the database | nothing (always on) | `docker compose --profile local up -d --wait db` |
+| Data and cursors | shared by the whole team | on your machine only, starts empty |
+| Wipe it | in the Neon console | `docker compose --profile local down -v` |
 
-The pipeline creates its own tables in whichever database it points at, so both start the same way.
-For Neon, use the **direct** connection string (host without `-pooler`), since load creates tables.
-Each database keeps its own cursors, so the first `fill` against either one starts from scratch.
+The pipeline creates its own tables in whichever database it points at, and each database keeps its own
+cursors, so the first `fill` against a new database starts from scratch. Details and troubleshooting for both:
+[docs/docker.md](docs/docker.md).
 
 ## Layer notes
 
